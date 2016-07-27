@@ -68,12 +68,6 @@ struct _virUSBDeviceList {
     virUSBDevicePtr *devs;
 };
 
-typedef enum {
-    USB_DEVICE_ALL = 0,
-    USB_DEVICE_FIND_BY_VENDOR = 1 << 0,
-    USB_DEVICE_FIND_BY_BUS = 1 << 1,
-} virUSBDeviceFindFlags;
-
 static virClassPtr virUSBDeviceListClass;
 
 static void virUSBDeviceListDispose(void *obj);
@@ -119,11 +113,33 @@ static int virUSBSysReadFile(const char *f_name, const char *d_name,
     return ret;
 }
 
+static int virUSBSysReadFileStr(const char *f_name, const char *d_name,
+                                char **value)
+{
+    int ret = -1, tmp;
+    char *buf = NULL;
+    char *filename = NULL;
+
+    tmp = virAsprintf(&filename, USB_SYSFS "/devices/%s/%s", d_name, f_name);
+    if (tmp < 0)
+        goto cleanup;
+
+    if (virFileReadAll(filename, 1024, &buf) < 0)
+        goto cleanup;
+
+    *value = buf;
+    ret = 0;
+ cleanup:
+    VIR_FREE(filename);
+    return ret;
+}
+
 static virUSBDeviceListPtr
 virUSBDeviceSearch(unsigned int vendor,
                    unsigned int product,
                    unsigned int bus,
                    unsigned int devno,
+                   const char *port,
                    const char *vroot,
                    unsigned int flags)
 {
@@ -143,6 +159,8 @@ virUSBDeviceSearch(unsigned int vendor,
 
     while ((direrr = virDirRead(dir, &de, USB_SYSFS "/devices")) > 0) {
         unsigned int found_prod, found_vend, found_bus, found_devno;
+        char *found_port;
+        bool port_matches;
         char *tmpstr = de->d_name;
 
         if (strchr(de->d_name, ':'))
@@ -170,12 +188,27 @@ virUSBDeviceSearch(unsigned int vendor,
                               10, &found_devno) < 0)
             goto cleanup;
 
+        if (virUSBSysReadFileStr("devpath", de->d_name,
+                                 &found_port) < 0) {
+            goto cleanup;
+        } else {
+            found_port[strlen(found_port) - 1] = '\0'; /* remove newline */
+            port_matches = STREQ_NULLABLE(found_port, port);
+            VIR_FREE(found_port);
+        }
+
         if ((flags & USB_DEVICE_FIND_BY_VENDOR) &&
             (found_prod != product || found_vend != vendor))
             continue;
 
-        if (flags & USB_DEVICE_FIND_BY_BUS) {
+        if (flags & USB_DEVICE_FIND_BY_DEVICE) {
             if (found_bus != bus || found_devno != devno)
+                continue;
+            found = true;
+        }
+
+        if (flags & USB_DEVICE_FIND_BY_PORT) {
+            if (found_bus != bus || !port_matches)
                 continue;
             found = true;
         }
@@ -204,122 +237,49 @@ virUSBDeviceSearch(unsigned int vendor,
 }
 
 int
-virUSBDeviceFindByVendor(unsigned int vendor,
-                         unsigned int product,
-                         const char *vroot,
-                         bool mandatory,
-                         virUSBDeviceListPtr *devices)
+virUSBDeviceFind(unsigned int vendor,
+                 unsigned int product,
+                 unsigned int bus,
+                 unsigned int devno,
+                 const char *port,
+                 const char *vroot,
+                 bool mandatory,
+                 unsigned int flags,
+                 virUSBDeviceListPtr *devices)
 {
     virUSBDeviceListPtr list;
     int count;
 
-    if (!(list = virUSBDeviceSearch(vendor, product, 0, 0,
-                                    vroot,
-                                    USB_DEVICE_FIND_BY_VENDOR)))
+    if (!(list = virUSBDeviceSearch(vendor, product, bus, devno, port,
+                                    vroot, flags)))
         return -1;
 
-    if (list->count == 0) {
+    count = list->count;
+    if (count == 0) {
         virObjectUnref(list);
         if (!mandatory) {
-            VIR_DEBUG("Did not find USB device %x:%x",
-                      vendor, product);
             if (devices)
                 *devices = NULL;
             return 0;
         }
 
         virReportError(VIR_ERR_INTERNAL_ERROR,
-                       _("Did not find USB device %x:%x"), vendor, product);
+                       _("Did not find a matching USB device (matching "
+                         "on%s%s%s all others ignored): vid:%04x, pid:%04x, "
+                         "bus:%u, device:%u, port:%s"),
+                       flags & USB_DEVICE_FIND_BY_VENDOR ? " vid/pid," : "",
+                       flags & USB_DEVICE_FIND_BY_DEVICE ? " bus/device," : "",
+                       flags & USB_DEVICE_FIND_BY_PORT ? " bus/port," : "",
+                       vendor, product, bus, devno, port ? port : "(null)");
         return -1;
     }
 
-    count = list->count;
     if (devices)
         *devices = list;
     else
         virObjectUnref(list);
 
     return count;
-}
-
-int
-virUSBDeviceFindByBus(unsigned int bus,
-                      unsigned int devno,
-                      const char *vroot,
-                      bool mandatory,
-                      virUSBDevicePtr *usb)
-{
-    virUSBDeviceListPtr list;
-
-    if (!(list = virUSBDeviceSearch(0, 0, bus, devno,
-                                    vroot,
-                                    USB_DEVICE_FIND_BY_BUS)))
-        return -1;
-
-    if (list->count == 0) {
-        virObjectUnref(list);
-        if (!mandatory) {
-            VIR_DEBUG("Did not find USB device bus:%u device:%u",
-                      bus, devno);
-            if (usb)
-                *usb = NULL;
-            return 0;
-        }
-
-        virReportError(VIR_ERR_INTERNAL_ERROR,
-                       _("Did not find USB device bus:%u device:%u"),
-                       bus, devno);
-        return -1;
-    }
-
-    if (usb) {
-        *usb = virUSBDeviceListGet(list, 0);
-        virUSBDeviceListSteal(list, *usb);
-    }
-    virObjectUnref(list);
-
-    return 0;
-}
-
-int
-virUSBDeviceFind(unsigned int vendor,
-                 unsigned int product,
-                 unsigned int bus,
-                 unsigned int devno,
-                 const char *vroot,
-                 bool mandatory,
-                 virUSBDevicePtr *usb)
-{
-    virUSBDeviceListPtr list;
-
-    unsigned int flags = USB_DEVICE_FIND_BY_VENDOR|USB_DEVICE_FIND_BY_BUS;
-    if (!(list = virUSBDeviceSearch(vendor, product, bus, devno,
-                                    vroot, flags)))
-        return -1;
-
-    if (list->count == 0) {
-        virObjectUnref(list);
-        if (!mandatory) {
-            VIR_DEBUG("Did not find USB device %x:%x bus:%u device:%u",
-                      vendor, product, bus, devno);
-            if (usb)
-                *usb = NULL;
-            return 0;
-        }
-
-        virReportError(VIR_ERR_INTERNAL_ERROR,
-                       _("Did not find USB device %x:%x bus:%u device:%u"),
-                       vendor, product, bus, devno);
-        return -1;
-    }
-
-    if (usb) {
-        *usb = virUSBDeviceListGet(list, 0);
-        virUSBDeviceListSteal(list, *usb);
-    }
-    virObjectUnref(list);
-
-    return 0;
 }
 
 virUSBDevicePtr

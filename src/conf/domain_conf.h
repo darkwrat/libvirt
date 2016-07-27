@@ -317,6 +317,8 @@ VIR_ENUM_DECL(virDomainHostdevSubsysSCSIProtocol)
 typedef struct _virDomainHostdevSubsysUSB virDomainHostdevSubsysUSB;
 typedef virDomainHostdevSubsysUSB *virDomainHostdevSubsysUSBPtr;
 struct _virDomainHostdevSubsysUSB {
+    char *port;
+
     bool autoAddress; /* bus/device were filled automatically based
                          on vendor/product */
     unsigned bus;

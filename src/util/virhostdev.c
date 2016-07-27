@@ -1179,89 +1179,95 @@ virHostdevMarkUSBDevices(virHostdevManagerPtr mgr,
 
 
 static int
+virHostdevFindUSBDeviceWithFlags(virDomainHostdevDefPtr hostdev,
+                                 bool mandatory,
+                                 unsigned int flags,
+                                 virUSBDevicePtr *usb)
+{
+    virDomainHostdevSubsysUSBPtr usbsrc = &hostdev->source.subsys.u.usb;
+    unsigned vendor = usbsrc->vendor;
+    unsigned product = usbsrc->product;
+    unsigned bus = usbsrc->bus;
+    char *port = usbsrc->port;
+    unsigned device = usbsrc->device;
+    virUSBDeviceListPtr devs;
+    int rc;
+
+    rc = virUSBDeviceFind(vendor, product, bus, device, port, NULL,
+                          mandatory, flags, &devs);
+    if (rc < 0)
+        return -1;
+
+    if (rc == 1) {
+        *usb = virUSBDeviceListGet(devs, 0);
+        virUSBDeviceListSteal(devs, *usb);
+    }
+    virObjectUnref(devs);
+
+    if (rc > 1) {
+        virReportError(VIR_ERR_OPERATION_FAILED,
+                       _("Multiple USB devices for %x:%x, "
+                         "use <address> to specify one"),
+                       vendor, product);
+        return -1;
+    }
+
+    return rc;
+}
+
+static int
 virHostdevFindUSBDevice(virDomainHostdevDefPtr hostdev,
                         bool mandatory,
                         virUSBDevicePtr *usb)
 {
     virDomainHostdevSubsysUSBPtr usbsrc = &hostdev->source.subsys.u.usb;
     unsigned vendor = usbsrc->vendor;
-    unsigned product = usbsrc->product;
     unsigned bus = usbsrc->bus;
     unsigned device = usbsrc->device;
+    char *port = usbsrc->port;
     bool autoAddress = usbsrc->autoAddress;
+    unsigned int flags = 0;
     int rc;
 
     *usb = NULL;
 
-    if (vendor && bus) {
-        rc = virUSBDeviceFind(vendor, product, bus, device,
-                              NULL,
-                              autoAddress ? false : mandatory,
-                              usb);
-        if (rc < 0) {
-            return -1;
-        } else if (!autoAddress) {
-            goto out;
-        } else {
-            VIR_INFO("USB device %x:%x could not be found at previous"
-                     " address (bus:%u device:%u)",
-                     vendor, product, bus, device);
-        }
-    }
+    /* First attempt, matching on all known fields. */
+    if (vendor)
+        flags |= USB_DEVICE_FIND_BY_VENDOR;
+    if (device)
+        flags |= USB_DEVICE_FIND_BY_DEVICE;
+    if (port)
+        flags |= USB_DEVICE_FIND_BY_PORT;
 
-    /* When vendor is specified, its USB address is either unspecified or the
-     * device could not be found at the USB device where it had been
-     * automatically found before.
-     */
-    if (vendor) {
-        virUSBDeviceListPtr devs;
+    rc = virHostdevFindUSBDeviceWithFlags(hostdev,
+                                          autoAddress ? false : mandatory,
+                                          flags, usb);
+    if (rc < 0)
+        return -1;
 
-        rc = virUSBDeviceFindByVendor(vendor, product, NULL, mandatory, &devs);
+    if (rc != 1 && autoAddress) {
+        VIR_INFO("USB device could not be found at previous address "
+                 "(bus:%u device:%u)", bus, device);
+
+        /* Second attempt, for when the device number has changed. */
+        flags &= ~((unsigned int) USB_DEVICE_FIND_BY_DEVICE);
+        usbsrc->device = 0;
+
+        rc = virHostdevFindUSBDeviceWithFlags(hostdev, mandatory,
+                                              flags, usb);
+
         if (rc < 0)
             return -1;
+    }
 
-        if (rc == 1) {
-            *usb = virUSBDeviceListGet(devs, 0);
-            virUSBDeviceListSteal(devs, *usb);
-        }
-        virObjectUnref(devs);
-
-        if (rc == 0) {
-            goto out;
-        } else if (rc > 1) {
-            if (autoAddress) {
-                virReportError(VIR_ERR_OPERATION_FAILED,
-                               _("Multiple USB devices for %x:%x were found,"
-                                 " but none of them is at bus:%u device:%u"),
-                               vendor, product, bus, device);
-            } else {
-                virReportError(VIR_ERR_OPERATION_FAILED,
-                               _("Multiple USB devices for %x:%x, "
-                                 "use <address> to specify one"),
-                               vendor, product);
-            }
-            return -1;
-        }
-
+    if (!*usb) {
+        hostdev->missing = true;
+    } else if (!usbsrc->bus || !usbsrc->device) {
         usbsrc->bus = virUSBDeviceGetBus(*usb);
         usbsrc->device = virUSBDeviceGetDevno(*usb);
         usbsrc->autoAddress = true;
-
-        if (autoAddress) {
-            VIR_INFO("USB device %x:%x found at bus:%u device:%u (moved"
-                     " from bus:%u device:%u)",
-                     vendor, product,
-                     usbsrc->bus, usbsrc->device,
-                     bus, device);
-        }
-    } else if (!vendor && bus) {
-        if (virUSBDeviceFindByBus(bus, device, NULL, mandatory, usb) < 0)
-            return -1;
     }
 
- out:
-    if (!*usb)
-        hostdev->missing = true;
     return 0;
 }
 

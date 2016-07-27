@@ -35,29 +35,26 @@ typedef virUSBDevice *virUSBDevicePtr;
 typedef struct _virUSBDeviceList virUSBDeviceList;
 typedef virUSBDeviceList *virUSBDeviceListPtr;
 
+typedef enum {
+    USB_DEVICE_ALL = 0,
+    USB_DEVICE_FIND_BY_VENDOR = 1 << 0,
+    USB_DEVICE_FIND_BY_DEVICE = 1 << 1,
+    USB_DEVICE_FIND_BY_PORT = 1 << 2,
+} virUSBDeviceFindFlags;
+
 virUSBDevicePtr virUSBDeviceNew(unsigned int bus,
                                 unsigned int devno,
                                 const char *vroot);
-
-int virUSBDeviceFindByBus(unsigned int bus,
-                          unsigned int devno,
-                          const char *vroot,
-                          bool mandatory,
-                          virUSBDevicePtr *usb);
-
-int virUSBDeviceFindByVendor(unsigned int vendor,
-                             unsigned int product,
-                             const char *vroot,
-                             bool mandatory,
-                             virUSBDeviceListPtr *devices);
 
 int virUSBDeviceFind(unsigned int vendor,
                      unsigned int product,
                      unsigned int bus,
                      unsigned int devno,
+                     const char *port,
                      const char *vroot,
                      bool mandatory,
-                     virUSBDevicePtr *usb);
+                     unsigned int flags,
+                     virUSBDeviceListPtr *devices);
 
 void virUSBDeviceFree(virUSBDevicePtr dev);
 int virUSBDeviceSetUsedBy(virUSBDevicePtr dev,

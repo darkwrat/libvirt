@@ -5564,7 +5564,8 @@ virDomainHostdevSubsysUSBDefParseXML(xmlNodePtr node,
                     goto out;
                 }
             } else if (xmlStrEqual(cur->name, BAD_CAST "address")) {
-                char *bus, *device;
+                char *bus, *device, *port;
+                bool dev_or_port = false;
 
                 bus = virXMLPropString(cur, "bus");
                 if (bus) {
@@ -5590,10 +5591,24 @@ virDomainHostdevSubsysUSBDefParseXML(xmlNodePtr node,
                         VIR_FREE(device);
                         goto out;
                     }
+                    dev_or_port = true;
                     VIR_FREE(device);
-                } else {
+                }
+
+                port = virXMLPropString(cur, "port");
+                if (port) {
+                    if (*port) {
+                        usbsrc->port = port;
+                        dev_or_port = true;
+                    } else {
+                        VIR_FREE(port);
+                    }
+                }
+
+                if (!dev_or_port) {
                     virReportError(VIR_ERR_INTERNAL_ERROR, "%s",
-                                   _("usb address needs device id"));
+                                   _("usb address needs either device id "
+                                     "or port"));
                     goto out;
                 }
             } else {
@@ -20325,10 +20340,17 @@ virDomainHostdevDefFormatSubsys(virBufferPtr buf,
             virBufferAsprintf(buf, "<vendor id='0x%.4x'/>\n", usbsrc->vendor);
             virBufferAsprintf(buf, "<product id='0x%.4x'/>\n", usbsrc->product);
         }
-        if (usbsrc->bus || usbsrc->device) {
-            virBufferAsprintf(buf, "<address %sbus='%d' device='%d'/>\n",
-                              includeTypeInAddr ? "type='usb' " : "",
-                              usbsrc->bus, usbsrc->device);
+        if (usbsrc->bus || usbsrc->device || usbsrc->port) {
+            virBufferAddLit(buf, "<address");
+            if (includeTypeInAddr)
+                virBufferAddLit(buf, " type='usb'");
+            if (usbsrc->bus)
+                virBufferAsprintf(buf, " bus='%u'", usbsrc->bus);
+            if (usbsrc->device)
+                virBufferAsprintf(buf, " device='%u'", usbsrc->device);
+            if (usbsrc->port)
+                virBufferAsprintf(buf, " port='%s'", usbsrc->port);
+            virBufferAddLit(buf, "/>\n");
         }
         break;
     case VIR_DOMAIN_HOSTDEV_SUBSYS_TYPE_PCI:
